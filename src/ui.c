@@ -6,6 +6,7 @@
 
 #include <ctype.h>
 #include <gtk/gtk.h>
+#include <pango/pango.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -17,6 +18,55 @@ typedef struct {
     GtkWidget *listbox;
     int server_fd;
 } AppState;
+
+static void apply_css(void) {
+    GtkCssProvider *provider = gtk_css_provider_new();
+    const char *css =
+        "window#rcopy-window {"
+        "  background: #0f1115;"
+        "  color: #f2f3f6;"
+        "}"
+        "#search-box {"
+        "  background: #171a21;"
+        "  color: #e8ebf2;"
+        "  border-radius: 10px;"
+        "  border: 1px solid #2b3140;"
+        "  padding: 8px 10px;"
+        "}"
+        "list#clip-list {"
+        "  background: transparent;"
+        "}"
+        "row.clip-row {"
+        "  background: #151922;"
+        "  border-radius: 12px;"
+        "  border: 1px solid #2a3242;"
+        "  margin: 6px 2px;"
+        "  padding: 8px;"
+        "}"
+        "row.clip-row:selected {"
+        "  background: #1f2940;"
+        "  border-color: #5ea1ff;"
+        "}"
+        "label.clip-text {"
+        "  color: #edf1fb;"
+        "}"
+        "label.clip-meta {"
+        "  color: #98a6c1;"
+        "  font-size: 11px;"
+        "}"
+        "separator.clip-sep {"
+        "  color: #2b3140;"
+        "  margin-top: 6px;"
+        "}";
+
+    gtk_css_provider_load_from_data(provider, css, -1, NULL);
+    gtk_style_context_add_provider_for_screen(
+        gdk_screen_get_default(),
+        GTK_STYLE_PROVIDER(provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
+    );
+    g_object_unref(provider);
+}
 
 static int contains_case_insensitive(const char *haystack, const char *needle) {
     size_t i, j;
@@ -77,7 +127,7 @@ static gboolean on_window_key(GtkWidget *widget, GdkEventKey *event, gpointer us
         return TRUE;
     }
 
-    if (event->keyval == GDK_KEY_Down) {
+    if (event->keyval == GDK_KEY_Down || event->keyval == GDK_KEY_Up) {
         gtk_widget_grab_focus(state->listbox);
     }
 
@@ -115,6 +165,7 @@ static void rebuild_list(AppState *state) {
         }
 
         row = gtk_list_box_row_new();
+        gtk_style_context_add_class(gtk_widget_get_style_context(row), "clip-row");
         box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
         gtk_container_add(GTK_CONTAINER(row), box);
 
@@ -136,12 +187,26 @@ static void rebuild_list(AppState *state) {
             snprintf(meta, sizeof(meta), "%s  (%zu bytes)", item->mime_type, item->content_len);
             label = gtk_label_new(meta);
             gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+            gtk_style_context_add_class(gtk_widget_get_style_context(label), "clip-meta");
             gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
         } else {
             label = gtk_label_new(item->content != NULL ? item->content : "");
             gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
             gtk_label_set_line_wrap(GTK_LABEL(label), TRUE);
+            gtk_label_set_line_wrap_mode(GTK_LABEL(label), PANGO_WRAP_WORD_CHAR);
+            gtk_style_context_add_class(gtk_widget_get_style_context(label), "clip-text");
             gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
+        }
+
+        label = gtk_label_new(item->mime_type != NULL ? item->mime_type : "unknown");
+        gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+        gtk_style_context_add_class(gtk_widget_get_style_context(label), "clip-meta");
+        gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
+
+        {
+            GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+            gtk_style_context_add_class(gtk_widget_get_style_context(sep), "clip-sep");
+            gtk_box_pack_start(GTK_BOX(box), sep, FALSE, FALSE, 0);
         }
 
         gtk_widget_show_all(row);
@@ -206,8 +271,10 @@ int ui_run(const RcopyConfig *cfg) {
     storage_load_all(&state.cfg, &state.list, (size_t)state.cfg.max_items);
 
     gtk_init(NULL, NULL);
+    apply_css();
 
     state.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_widget_set_name(state.window, "rcopy-window");
     gtk_window_set_title(GTK_WINDOW(state.window), "rcopy");
     gtk_window_set_default_size(GTK_WINDOW(state.window), 760, 540);
 
@@ -216,13 +283,16 @@ int ui_run(const RcopyConfig *cfg) {
     gtk_container_add(GTK_CONTAINER(state.window), vbox);
 
     state.search = gtk_search_entry_new();
+    gtk_widget_set_name(state.search, "search-box");
     gtk_box_pack_start(GTK_BOX(vbox), state.search, FALSE, FALSE, 0);
 
     scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_box_pack_start(GTK_BOX(vbox), scroll, TRUE, TRUE, 0);
 
     state.listbox = gtk_list_box_new();
+    gtk_widget_set_name(state.listbox, "clip-list");
     gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(state.listbox), FALSE);
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(state.listbox), GTK_SELECTION_SINGLE);
     gtk_container_add(GTK_CONTAINER(scroll), state.listbox);
 
     rebuild_list(&state);
@@ -237,7 +307,7 @@ int ui_run(const RcopyConfig *cfg) {
     }
 
     gtk_widget_show_all(state.window);
-    gtk_widget_grab_focus(state.search);
+    gtk_widget_grab_focus(state.listbox);
     gtk_main();
     return 0;
 }
