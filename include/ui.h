@@ -3,6 +3,6 @@
 
 #include "config.h"
 
-int ui_run(const RcopyConfig *cfg);
+int ui_run(const RcopyConfig *cfg, int start_hidden);
 
 #endif

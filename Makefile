@@ -14,10 +14,34 @@ src/%.o: src/%.c
 	$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
 install: rcopy
+	mkdir -p $(HOME)/.config/systemd/user
 	mkdir -p $(HOME)/.local/bin
-	cp rcopy $(HOME)/.local/bin/rcopy
+	install -m 755 rcopy $(HOME)/.local/bin/rcopy.new
+	mv -f $(HOME)/.local/bin/rcopy.new $(HOME)/.local/bin/rcopy
+	cp scripts/rcopy.service $(HOME)/.config/systemd/user/rcopy.service
+	cp scripts/rcopy-picker.service $(HOME)/.config/systemd/user/rcopy-picker.service
+	systemctl --user daemon-reload
+	systemctl --user enable --now rcopy.service rcopy-picker.service
+
+install-bin: rcopy
+	mkdir -p $(HOME)/.local/bin
+	install -m 755 rcopy $(HOME)/.local/bin/rcopy.new
+	mv -f $(HOME)/.local/bin/rcopy.new $(HOME)/.local/bin/rcopy
+
+install-startup:
+	mkdir -p $(HOME)/.config/systemd/user
+	cp scripts/rcopy.service $(HOME)/.config/systemd/user/rcopy.service
+	cp scripts/rcopy-picker.service $(HOME)/.config/systemd/user/rcopy-picker.service
+	systemctl --user daemon-reload
+	systemctl --user enable --now rcopy.service rcopy-picker.service
+
+disable-startup:
+	systemctl --user disable --now rcopy.service rcopy-picker.service
+	rm -f $(HOME)/.config/systemd/user/rcopy.service
+	rm -f $(HOME)/.config/systemd/user/rcopy-picker.service
+	systemctl --user daemon-reload
 
 clean:
 	rm -f src/*.o rcopy
 
-.PHONY: all install clean
+.PHONY: all install install-bin install-startup disable-startup clean

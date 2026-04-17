@@ -155,6 +155,99 @@ static int build_item_path(const RcopyConfig *cfg, const char *id, const char *e
     return 0;
 }
 
+static void free_index_meta_array(IndexMeta *meta, size_t count) {
+    size_t i;
+    if (meta == NULL) {
+        return;
+    }
+    for (i = 0; i < count; i++) {
+        free(meta[i].id);
+        free(meta[i].mime_type);
+        free(meta[i].ext);
+    }
+    free(meta);
+}
+
+static int prune_to_limit(const RcopyConfig *cfg) {
+    FILE *fp;
+    IndexMeta *meta = NULL;
+    size_t meta_count = 0;
+    size_t meta_cap = 0;
+    size_t i;
+    size_t keep_from;
+    char line[512];
+
+    if (cfg->max_items <= 0) {
+        return 0;
+    }
+
+    fp = fopen(cfg->index_file, "r");
+    if (fp == NULL) {
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        size_t n = strlen(line);
+        IndexMeta m;
+
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) {
+            line[--n] = '\0';
+        }
+        if (n == 0) {
+            continue;
+        }
+
+        if (meta_count == meta_cap) {
+            size_t next = (meta_cap == 0) ? 64 : meta_cap * 2;
+            IndexMeta *tmp = realloc(meta, next * sizeof(IndexMeta));
+            if (tmp == NULL) {
+                fclose(fp);
+                free_index_meta_array(meta, meta_count);
+                return -1;
+            }
+            meta = tmp;
+            meta_cap = next;
+        }
+
+        memset(&m, 0, sizeof(m));
+        if (parse_index_line(line, &m.id, &m.mime_type, &m.ext) != 0) {
+            fclose(fp);
+            free_index_meta_array(meta, meta_count);
+            return -1;
+        }
+        meta[meta_count++] = m;
+    }
+    fclose(fp);
+
+    if (meta_count <= (size_t)cfg->max_items) {
+        free_index_meta_array(meta, meta_count);
+        return 0;
+    }
+
+    keep_from = meta_count - (size_t)cfg->max_items;
+
+    for (i = 0; i < keep_from; i++) {
+        char path[PATH_MAX];
+        if (build_item_path(cfg, meta[i].id, meta[i].ext, path, sizeof(path)) == 0) {
+            unlink(path);
+        }
+    }
+
+    fp = fopen(cfg->index_file, "w");
+    if (fp == NULL) {
+        free_index_meta_array(meta, meta_count);
+        return -1;
+    }
+
+    for (i = keep_from; i < meta_count; i++) {
+        fprintf(fp, "%s\t%s\t%s\n", meta[i].id, meta[i].mime_type, meta[i].ext);
+    }
+    fclose(fp);
+
+    free_index_meta_array(meta, meta_count);
+    return 0;
+}
+
 int storage_init(const RcopyConfig *cfg) {
     FILE *fp;
     if (ensure_dir(cfg->data_dir) != 0) {
@@ -200,7 +293,13 @@ int storage_save(const RcopyConfig *cfg, const char *mime_type, const char *data
     }
 
     fclose(fp);
-    return append_index(cfg, id, mime_type, ext);
+
+    if (append_index(cfg, id, mime_type, ext) != 0) {
+        return -1;
+    }
+
+    prune_to_limit(cfg);
+    return 0;
 }
 
 int storage_get_last(const RcopyConfig *cfg, ClipItem *item) {

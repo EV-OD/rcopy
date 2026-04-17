@@ -9,6 +9,7 @@
 #include <pango/pango.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 typedef struct {
     RcopyConfig cfg;
@@ -17,7 +18,141 @@ typedef struct {
     GtkWidget *search;
     GtkWidget *listbox;
     int server_fd;
+    time_t index_mtime;
+    off_t index_size;
 } AppState;
+
+static void rebuild_list(AppState *state);
+
+static const char *pick_best_mime(char **types, size_t count) {
+    static const char *preferred[] = {
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "text/plain;charset=utf-8",
+        "text/plain",
+    };
+    size_t i;
+    size_t j;
+
+    for (i = 0; i < sizeof(preferred) / sizeof(preferred[0]); i++) {
+        for (j = 0; j < count; j++) {
+            if (strcmp(preferred[i], types[j]) == 0) {
+                return types[j];
+            }
+        }
+    }
+
+    return (count > 0) ? types[0] : NULL;
+}
+
+static void sync_latest_clipboard(AppState *state) {
+    char **types = NULL;
+    size_t count = 0;
+    const char *mime_type = "text/plain";
+    char *current = NULL;
+    size_t current_len = 0;
+    ClipItem last;
+    int changed = 1;
+
+    memset(&last, 0, sizeof(last));
+
+    if (util_list_clipboard_types(&types, &count) == 0 && count > 0) {
+        const char *picked = pick_best_mime(types, count);
+        if (picked != NULL) {
+            mime_type = picked;
+            if (util_read_wl_paste_type(mime_type, &current, &current_len) != 0 || current_len == 0) {
+                free(current);
+                current = NULL;
+                current_len = 0;
+            }
+        }
+    }
+
+    if (current == NULL || current_len == 0) {
+        mime_type = "text/plain";
+        if (util_read_wl_paste(&current, &current_len) != 0 || current_len == 0) {
+            free(current);
+            util_free_string_list(types, count);
+            return;
+        }
+    }
+
+    if (storage_get_last(&state->cfg, &last) == 0 && last.content != NULL && last.mime_type != NULL) {
+        if (strcmp(last.mime_type, mime_type) == 0 &&
+            last.content_len == current_len &&
+            memcmp(last.content, current, current_len) == 0) {
+            changed = 0;
+        }
+    }
+
+    if (changed) {
+        storage_save(&state->cfg, mime_type, current, current_len);
+    }
+
+    storage_free_item(&last);
+    free(current);
+    util_free_string_list(types, count);
+}
+
+static int read_index_signature(AppState *state, time_t *mtime, off_t *size) {
+    struct stat st;
+    if (stat(state->cfg.index_file, &st) != 0) {
+        return -1;
+    }
+    *mtime = st.st_mtime;
+    *size = st.st_size;
+    return 0;
+}
+
+static void load_entries(AppState *state) {
+    storage_free_list(&state->list);
+    memset(&state->list, 0, sizeof(state->list));
+    storage_load_all(&state->cfg, &state->list, (size_t)state->cfg.max_items);
+
+    if (read_index_signature(state, &state->index_mtime, &state->index_size) != 0) {
+        state->index_mtime = 0;
+        state->index_size = 0;
+    }
+}
+
+static void refresh_entries(AppState *state) {
+    load_entries(state);
+    rebuild_list(state);
+}
+
+static void maybe_refresh_entries(AppState *state) {
+    time_t mtime = 0;
+    off_t size = 0;
+
+    if (read_index_signature(state, &mtime, &size) != 0) {
+        return;
+    }
+
+    if (mtime != state->index_mtime || size != state->index_size) {
+        refresh_entries(state);
+    }
+}
+
+static void hide_window(AppState *state) {
+    gtk_widget_hide(state->window);
+}
+
+static void show_window(AppState *state) {
+    sync_latest_clipboard(state);
+    maybe_refresh_entries(state);
+    gtk_widget_show_all(state->window);
+    gtk_window_present(GTK_WINDOW(state->window));
+    gtk_widget_grab_focus(state->listbox);
+}
+
+static void toggle_window(AppState *state) {
+    if (gtk_widget_get_visible(state->window)) {
+        hide_window(state);
+    } else {
+        show_window(state);
+    }
+}
 
 static void apply_css(void) {
     GtkCssProvider *provider = gtk_css_provider_new();
@@ -99,7 +234,7 @@ static int contains_case_insensitive(const char *haystack, const char *needle) {
     return 0;
 }
 
-static void activate_selected_and_close(AppState *state) {
+static void activate_selected_and_hide(AppState *state) {
     GtkListBoxRow *row = gtk_list_box_get_selected_row(GTK_LIST_BOX(state->listbox));
     if (row != NULL) {
         const char *content = g_object_get_data(G_OBJECT(row), "content");
@@ -111,19 +246,19 @@ static void activate_selected_and_close(AppState *state) {
             util_run_shell(state->cfg.paste_command);
         }
     }
-    gtk_window_close(GTK_WINDOW(state->window));
+    hide_window(state);
 }
 
 static gboolean on_window_key(GtkWidget *widget, GdkEventKey *event, gpointer user_data) {
     AppState *state = user_data;
 
     if (event->keyval == GDK_KEY_Escape) {
-        gtk_window_close(GTK_WINDOW(state->window));
+        hide_window(state);
         return TRUE;
     }
 
     if (event->keyval == GDK_KEY_Return || event->keyval == GDK_KEY_KP_Enter) {
-        activate_selected_and_close(state);
+        activate_selected_and_hide(state);
         return TRUE;
     }
 
@@ -235,15 +370,22 @@ static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_
     AppState *state = user_data;
     (void)box;
     (void)row;
-    activate_selected_and_close(state);
+    activate_selected_and_hide(state);
 }
 
 static gboolean on_ipc_tick(gpointer user_data) {
     AppState *state = user_data;
     if (toggle_server_poll(state->server_fd)) {
-        gtk_window_close(GTK_WINDOW(state->window));
-        return FALSE;
+        toggle_window(state);
     }
+    return TRUE;
+}
+
+static gboolean on_window_delete(GtkWidget *widget, GdkEvent *event, gpointer user_data) {
+    AppState *state = user_data;
+    (void)widget;
+    (void)event;
+    hide_window(state);
     return TRUE;
 }
 
@@ -255,7 +397,7 @@ static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
     gtk_main_quit();
 }
 
-int ui_run(const RcopyConfig *cfg) {
+int ui_run(const RcopyConfig *cfg, int start_hidden) {
     AppState state;
     GtkWidget *vbox;
     GtkWidget *scroll;
@@ -263,12 +405,14 @@ int ui_run(const RcopyConfig *cfg) {
     memset(&state, 0, sizeof(state));
     state.cfg = *cfg;
     state.server_fd = -1;
+    state.index_mtime = 0;
+    state.index_size = 0;
 
     if (storage_init(&state.cfg) != 0) {
         return 1;
     }
 
-    storage_load_all(&state.cfg, &state.list, (size_t)state.cfg.max_items);
+    load_entries(&state);
 
     gtk_init(NULL, NULL);
     apply_css();
@@ -300,14 +444,21 @@ int ui_run(const RcopyConfig *cfg) {
     g_signal_connect(state.search, "changed", G_CALLBACK(on_search_changed), &state);
     g_signal_connect(state.listbox, "row-activated", G_CALLBACK(on_row_activated), &state);
     g_signal_connect(state.window, "key-press-event", G_CALLBACK(on_window_key), &state);
+    g_signal_connect(state.window, "delete-event", G_CALLBACK(on_window_delete), &state);
     g_signal_connect(state.window, "destroy", G_CALLBACK(on_window_destroy), &state);
 
     if (toggle_server_start(&state.cfg, &state.server_fd) == 0) {
-        g_timeout_add(100, on_ipc_tick, &state);
+        g_timeout_add(50, on_ipc_tick, &state);
     }
 
-    gtk_widget_show_all(state.window);
-    gtk_widget_grab_focus(state.listbox);
+    if (start_hidden) {
+        /* Realize and keep resident so first toggle is instant. */
+        gtk_widget_show_all(state.window);
+        gtk_widget_hide(state.window);
+    } else {
+        show_window(&state);
+    }
+
     gtk_main();
     return 0;
 }

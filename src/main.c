@@ -10,6 +10,7 @@
 static void print_usage(void) {
     printf("rcopy daemon\n");
     printf("rcopy toggle\n");
+    printf("rcopy picker\n");
 }
 
 int main(int argc, char **argv) {
@@ -37,7 +38,11 @@ int main(int argc, char **argv) {
         if (toggle_send(&cfg)) {
             return 0;
         }
-        return ui_run(&cfg);
+        return ui_run(&cfg, 0);
+    }
+
+    if (strcmp(argv[1], "picker") == 0) {
+        return ui_run(&cfg, 1);
     }
 
     print_usage();
